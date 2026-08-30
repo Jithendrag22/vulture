@@ -1,0 +1,82 @@
+name: vulture-scan
+
+# 4H bars close at 00 04 08 12 16 20 UTC.
+#
+# GitHub's cron is best-effort: runs arrive late and are SKIPPED entirely under
+# load, most often on the hour. So this does not try to fire once at the bar
+# close. It fires three times per bar - at :05 and :35 of the close hour, and
+# :05 of the next hour - and `scanner.py --if-new-bar` decides whether there is
+# anything to do by comparing the exchange's latest closed bar against the last
+# one recorded in paper_trades/last_bar.txt.
+#
+# A late run still catches the bar. A duplicate run exits in ~20s having done
+# nothing. All three would have to be dropped to miss a bar.
+#
+# 18 runs/day ~= 540 runs/month. At roughly a minute each that is well inside
+# the 2,000 free minutes a private repo gets.
+on:
+  schedule:
+    - cron: "5,35 0,4,8,12,16,20 * * *"
+    - cron: "5 1,5,9,13,17,21 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Scan even if no new bar has closed"
+        type: boolean
+        default: false
+
+concurrency:
+  group: vulture-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # the journal is committed back; that is the state store
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -q -r requirements.txt
+
+      - name: Scan
+        env:
+          # fapi.binance.com returns 451 to a GitHub runner. The spot mirror
+          # answers 200 with identical symbols and JSON; RESULTS_SPOT_PARITY.md
+          # measures that the strategy survives the swap (expectancy correlation
+          # 0.9943, rank ordering unchanged).
+          VULTURE_MARKET: spot
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Account size stays out of a public repo.
+          VULTURE_CAPITAL: ${{ secrets.VULTURE_CAPITAL }}
+          VULTURE_RISK_PCT: ${{ secrets.VULTURE_RISK_PCT }}
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            python scanner.py
+          else
+            python scanner.py --if-new-bar
+          fi
+
+      - name: Persist the journal
+        run: |
+          git config user.name  "vulture-bot"
+          git config user.email "vulture-bot@users.noreply.github.com"
+          git add -A paper_trades
+          if git diff --cached --quiet; then
+            echo "No journal change."
+          else
+            git commit -m "journal: $(date -u '+%Y-%m-%d %H:%M UTC')"
+            # A scheduled run can race a concurrent push; rebase and retry once
+            # rather than fail and leave state unsaved.
+            git pull --rebase --autostash -q || true
+            git push -q
+            echo "Journal committed."
+          fi
