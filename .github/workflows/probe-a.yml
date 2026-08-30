@@ -1,0 +1,14 @@
+# TEMPORARY probe. Simplest possible: once an hour, top of hour.
+# Does nothing: no data, no Telegram, no commits.
+name: probe-a
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "workflow=probe-a cron=0 * * * *"
+          echo "fired $(date -u '+%F %T') UTC  trigger=${{ github.event_name }}"

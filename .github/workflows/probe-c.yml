@@ -1,0 +1,14 @@
+# TEMPORARY probe. Twice an hour on odd minutes, away from load peaks.
+# Does nothing: no data, no Telegram, no commits.
+name: probe-c
+on:
+  schedule:
+    - cron: "13,43 * * * *"
+  workflow_dispatch:
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "workflow=probe-c cron=13,43 * * * *"
+          echo "fired $(date -u '+%F %T') UTC  trigger=${{ github.event_name }}"
