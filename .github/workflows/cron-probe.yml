@@ -1,0 +1,17 @@
+# TEMPORARY. Answers one question: does GitHub fire scheduled workflows for
+# this repository at all? The scanner's own schedule missed three consecutive
+# slots while it was private, and waiting 4 hours per sample is no way to test.
+#
+# Does nothing: no data, no Telegram, no commits. Delete once answered.
+name: cron-probe
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "fired at $(date -u '+%Y-%m-%d %H:%M:%S') UTC"
+          echo "trigger: ${{ github.event_name }}"
