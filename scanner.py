@@ -134,7 +134,7 @@ H52_COOLDOWN_BARS = 6    # don't re-fire on the same push
 # repository secrets in CI, or in .env locally). The defaults below are a
 # placeholder so a clone runs and produces sane-looking sizing - they are not
 # anybody's real numbers.
-CAPITAL = float(os.environ.get("VULTURE_CAPITAL", 50_000.0))     # rupees
+CAPITAL = float(os.environ.get("VULTURE_CAPITAL", 100_000.0))    # rupees
 RISK_PCT = float(os.environ.get("VULTURE_RISK_PCT", 0.01))       # 1% default
 MAX_CONCURRENT = 5        # tested 1-10; 5 beat 3 in 6/7 years (+Rs 13,114/yr, DD 8.8->9.2%)
 USDINR = 88.0              # refreshed manually; only affects display sizing
@@ -191,7 +191,7 @@ def fetch_klines(symbol: str, interval: str, limit: int = 400) -> pd.DataFrame:
     return df.iloc[:-1].reset_index(drop=True)
 
 
-def fetch_daily_context(symbol: str, days: int = 365) -> dict:
+def fetch_daily_context(symbol: str, days: int = 365, as_of=None) -> dict:
     """
     One daily-bar request serving two purposes:
       - the trailing 52-week high (Strategy 2)
@@ -205,6 +205,14 @@ def fetch_daily_context(symbol: str, days: int = 365) -> dict:
         d = fetch_klines(symbol, "1d", limit=min(days + 5, 1000))
     except Exception:
         return {}
+    # CATCH-UP CORRECTNESS. When re-scanning a bar that closed hours ago, the
+    # daily filter must use only daily bars that had CLOSED by then. Using
+    # today's daily trend to judge an older 4H bar is lookahead - the same
+    # class of defect AUDIT.md records in the backtest resampler. Daily bars
+    # close at 00:00 UTC, so within one UTC day this changes nothing; across a
+    # midnight boundary it is the difference between honest and flattering.
+    if as_of is not None:
+        d = d[d["dt"] + pd.Timedelta(days=1) <= as_of]
     if len(d) < 200:
         return {}
     ema50 = d["close"].ewm(span=50, adjust=False).mean()
@@ -267,7 +275,7 @@ def _build_alert(d, i, symbol, side, strategy, atr, rank, extra=None) -> Alert:
     )
 
 
-def evaluate(symbol: str) -> list[Alert]:
+def evaluate(symbol: str, bars_back: int = 0) -> list[Alert]:
     """
     Evaluate BOTH strategies on the most recently CLOSED bar.
 
@@ -282,7 +290,9 @@ def evaluate(symbol: str) -> list[Alert]:
     d = indicators.add_all(df[["dt", "open", "high", "low", "close", "volume"]])
     d["atr_pct_rank"] = indicators.rolling_percentile(d["atr_pct"], 200)
 
-    i = len(d) - 1
+    i = len(d) - 1 - bars_back
+    if i < 250:
+        return []
     c = float(d["close"].iloc[i])
     a = float(d["atr14"].iloc[i])
     e200 = float(d["ema200"].iloc[i])
@@ -293,7 +303,8 @@ def evaluate(symbol: str) -> list[Alert]:
     # Daily context: 52-week high AND the daily trend used as the MTF filter.
     # One request, two uses. If it is unavailable we do not trade the symbol
     # this bar rather than trading it unfiltered.
-    ctx = fetch_daily_context(symbol)
+    bar_close = d["dt"].iloc[i] + pd.Timedelta(hours=4)
+    ctx = fetch_daily_context(symbol, as_of=bar_close)
     if not ctx:
         return []
     daily_up = ctx["daily_uptrend"]
@@ -517,7 +528,7 @@ def next_4h_close() -> datetime:
             else nxt.replace(hour=h))
 
 
-def scan_once(dry_run: bool):
+def scan_once(dry_run: bool, bars_back: int = 0):
     journal = load_journal()
 
     notes = mark_to_market(journal)
@@ -540,7 +551,7 @@ def scan_once(dry_run: bool):
     # failure be that symbol's problem only.
     alerts = []
     with ThreadPoolExecutor(max_workers=10) as ex:
-        futs = {ex.submit(evaluate, sym): sym for sym in UNIVERSE}
+        futs = {ex.submit(evaluate, sym, bars_back): sym for sym in UNIVERSE}
         for fut in as_completed(futs):
             sym = futs[fut]
             try:
@@ -600,6 +611,35 @@ def scan_once(dry_run: bool):
 
 LAST_BAR = ROOT / "paper_trades" / "last_bar.txt"
 
+MAX_CATCHUP_BARS = 6          # 24h. Older than that, alerting is pointless.
+
+
+def unscanned_bars() -> list:
+    """Every 4H bar that has closed since the last one we scanned.
+
+    MEASURED 30-31 Aug: GitHub dispatches a scheduled workflow roughly once
+    every 2-3 hours REGARDLESS of the cron expression - `*/5` and `0 * * * *`
+    both got ~4 fires in 12 hours. Gaps therefore exceed 4 hours routinely, and
+    a scanner that only ever looks at the LATEST closed bar silently drops
+    every bar it slept through. That happened: a 5.5h gap swallowed the 20:00
+    bar, which carried two real signals.
+
+    Scanning every missed bar turns an unreliable scheduler from something that
+    loses signals into something that delivers them late - and the alert's
+    drift line already shows the reader how late.
+    """
+    df = fetch_klines("BTCUSDT", "4h", limit=MAX_CATCHUP_BARS + 3)
+    closed = [b.to_pydatetime() for b in df["dt"]]
+    try:
+        seen = datetime.fromisoformat(LAST_BAR.read_text().strip())
+    except (OSError, ValueError):
+        return closed[-1:]                     # first run: latest bar only
+    missed = [b for b in closed if b > seen]
+    return missed[-MAX_CATCHUP_BARS:]
+
+
+
+
 
 def latest_closed_bar() -> datetime:
     """Open time of the most recent CLOSED 4H bar, from the exchange itself."""
@@ -638,14 +678,20 @@ def main():
     args = ap.parse_args()
 
     if args.if_new_bar:
-        fresh, bar = new_bar_since_last_scan()
-        if not fresh:
-            print(f"No new 4H bar (latest closed {bar:%Y-%m-%d %H:%M} UTC). Nothing to do.")
+        missed = unscanned_bars()
+        if not missed:
+            print("No new 4H bar. Nothing to do.")
             return
-        print(f"New 4H bar closed at {bar:%Y-%m-%d %H:%M} UTC - scanning.", flush=True)
-        scan_once(args.dry_run)
-        record_scanned_bar(bar)
-        return
+        if len(missed) > 1:
+            print(f"{len(missed)} bars closed since the last scan - catching up.", flush=True)
+        latest = missed[-1]
+        for bar in missed:
+            back = int((latest - bar).total_seconds() // (4 * 3600))
+            print(f"\nScanning bar {bar:%Y-%m-%d %H:%M} UTC"
+                  f"{f' (catch-up, {back} bars back)' if back else ''}", flush=True)
+            scan_once(args.dry_run, bars_back=back)
+            record_scanned_bar(bar)      # per bar, so a crash mid-catch-up
+        return                           # does not re-alert what already went out
 
     if not args.loop:
         scan_once(args.dry_run)
