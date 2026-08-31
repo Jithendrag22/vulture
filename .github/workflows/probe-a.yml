@@ -1,4 +1,19 @@
-# TEMPORARY probe. Simplest possible: once an hour, top of hour.
+# Kept deliberately, as the control for an ongoing experiment.
+#
+# MEASURED 30 Aug, 12 hours, five workflows on this repo:
+#   */5  requested ~144 fires -> got 4
+#   */10 requested  ~72 fires -> got 4
+#   13,43 requested ~24 fires -> got 4
+#   0 * * * * requested ~12   -> got 3
+# The dispatch rate is INDEPENDENT of the cron expression: roughly one fire
+# every 2-3 hours per workflow, with 13-50 min of jitter. Asking more often
+# buys nothing.
+#
+# OPEN QUESTION this probe now answers: is that throttle per-WORKFLOW or a
+# shared per-ACCOUNT budget? Three sibling probes were deleted on 31 Aug. If
+# this one's fire rate roughly doubles, the budget is shared - and every extra
+# workflow was starving the scanner. If it is unchanged, the throttle is
+# per-workflow and workflow count does not matter.
 # Does nothing: no data, no Telegram, no commits.
 name: probe-a
 on:
