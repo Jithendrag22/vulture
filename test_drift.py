@@ -52,3 +52,29 @@ def test_price_lookup_failure_never_breaks_the_alert():
     a = scanner.Alert(side="long", entry=ENTRY, stop=4.605, **BASE)
     with patch.object(scanner, "http_json", side_effect=OSError("network down")):
         assert scanner.live_drift(a) == ""
+
+
+def test_age_is_measured_from_bar_close_not_open():
+    """signal_time is the bar's OPEN time; a 4H bar closes 4h later.
+
+    Ageing from the open reported every alert as 4h staler than it really was,
+    which for a catch-up scan is the difference between "act now" and "stale".
+    """
+    from datetime import datetime, timedelta, timezone
+
+    opened = datetime(2026, 9, 1, 8, 0, tzinfo=timezone.utc)      # closes 12:00
+    now = opened + timedelta(hours=4, minutes=7)                  # 7 min post-close
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    a = scanner.Alert(side="long", entry=ENTRY, stop=4.605,
+                      **{**BASE, "signal_time": str(opened)})
+    with patch.object(scanner, "http_json", return_value={"price": str(ENTRY)}), \
+         patch.object(scanner, "datetime", _Clock):
+        line = scanner.live_drift(a)
+
+    assert "7 min ago" in line, line
+    assert "247 min ago" not in line, "aged from the bar open, not its close"

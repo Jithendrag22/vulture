@@ -462,8 +462,11 @@ def live_drift(a: "Alert") -> str:
     except Exception:
         return ""     # never let a price lookup break the alert
 
-    bar = datetime.fromisoformat(a.signal_time)
-    age = (datetime.now(timezone.utc) - bar).total_seconds() / 60.0
+    # signal_time is the bar's OPEN time (klines are keyed on open_time), so
+    # the bar did not close until 4h later. Ageing from the open overstates
+    # staleness by a full bar and makes every alert look 4h later than it is.
+    close = datetime.fromisoformat(a.signal_time) + timedelta(hours=4)
+    age = (datetime.now(timezone.utc) - close).total_seconds() / 60.0
 
     risk = abs(a.entry - a.stop)
     # Positive = ADVERSE: the move since the bar close is against the entry,
@@ -505,7 +508,8 @@ def format_alert(a: Alert) -> str:
         f"Risk    ₹{risk_rupees:,.0f} if stopped  ·  "
         f"reward ₹{risk_rupees*a.rr:,.0f} at target\n"
         f"ATR     {a.atr_pct:.2f}%  ·  vol rank {a.atr_rank:.2f}\n\n"
-        f"<i>Paper trade. Bar close {a.signal_time[:16]}</i>"
+        f"<i>Paper trade. Bar close "
+        f"{(datetime.fromisoformat(a.signal_time) + timedelta(hours=4)):%Y-%m-%d %H:%M} UTC</i>"
     )
 
 
