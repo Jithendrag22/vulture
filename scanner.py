@@ -376,12 +376,26 @@ def mark_to_market(journal: list[dict]) -> list[str]:
         if j.get("status") != "open":
             continue
         try:
-            df = fetch_klines(j["symbol"], INTERVAL, limit=MAX_HOLD_BARS + 5)
+            # The window must reach back past the OLDEST position we could be
+            # asked to mark: a full hold (MAX_HOLD_BARS) plus however long the
+            # scheduler may have been silent (MAX_CATCHUP_BARS). Fetching only
+            # MAX_HOLD_BARS+5 left a 16h margin, under the 24h catch-up ceiling
+            # -- a position whose signal fell off the front of the window had
+            # its early bars never examined, so a stop hit there was missed and
+            # the time stop fired late, at the wrong bar's price.
+            df = fetch_klines(j["symbol"], INTERVAL,
+                              limit=MAX_HOLD_BARS + MAX_CATCHUP_BARS + 5)
         except Exception:
             continue
         sig_t = pd.Timestamp(j["signal_time"])
         after = df[df["dt"] > sig_t]
         if after.empty:
+            continue
+        if sig_t < df["dt"].iloc[0]:
+            # Should be unreachable now, but never mark a position we cannot
+            # see the whole life of -- a silent wrong exit is worse than none.
+            notes.append(f"⚠️ {j['symbol']}: history does not reach its entry "
+                         f"({sig_t}); left open, exits NOT evaluated.")
             continue
 
         for _, bar in after.iterrows():
