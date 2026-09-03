@@ -78,3 +78,36 @@ def test_age_is_measured_from_bar_close_not_open():
 
     assert "7 min ago" in line, line
     assert "247 min ago" not in line, "aged from the bar open, not its close"
+
+
+def test_mark_to_market_does_not_persist_a_synthetic_journal():
+    """A what-if check must never overwrite the real record.
+
+    mark_to_market rewrites journal.jsonl from the list it is handed. Called
+    with a test fixture and no guard, it replaces live trading history with
+    that fixture -- which is exactly how the Mac journal was destroyed.
+    """
+    import json
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    # A bar window the fixture's signal_time sits inside, so the position
+    # really does close and the write path really is reached.
+    bars = scanner.fetch_klines("BTCUSDT", "4h",
+                                limit=scanner.MAX_HOLD_BARS + scanner.MAX_CATCHUP_BARS + 5)
+    sig = bars["dt"].iloc[1]
+    px = float(bars["close"].iloc[1])
+
+    with TemporaryDirectory() as tmp:
+        real = Path(tmp) / "journal.jsonl"
+        keep = {"symbol": "REALUSDT", "status": "open"}
+        real.write_text(json.dumps(keep) + "\n")
+
+        fake = [dict(symbol="BTCUSDT", side="long", status="open",
+                     signal_time=str(sig), entry=px,
+                     stop=px * 0.99, target=px * 1.01)]   # both reachable fast
+        with patch.object(scanner, "journal_path", return_value=real):
+            notes = scanner.mark_to_market(fake, persist=False)
+
+        assert fake[0]["status"] == "closed", "fixture must reach the write path"
+        assert [json.loads(l) for l in real.read_text().splitlines()] == [keep]

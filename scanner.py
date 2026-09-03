@@ -368,8 +368,14 @@ def open_positions(journal: list[dict]) -> list[dict]:
     return [j for j in journal if j.get("status") == "open"]
 
 
-def mark_to_market(journal: list[dict]) -> list[str]:
-    """Check open paper positions against current price; close on SL/TP."""
+def mark_to_market(journal: list[dict], persist: bool = True) -> list[str]:
+    """Check open paper positions against current price; close on SL/TP.
+
+    Rewrites the journal file in place when anything closes. Callers that pass
+    a synthetic journal (tests, what-if checks) MUST pass persist=False -- this
+    function will otherwise write whatever list it was handed over the real
+    record, and a test fixture becomes your trading history.
+    """
     notes = []
     changed = False
     for j in journal:
@@ -427,7 +433,7 @@ def mark_to_market(journal: list[dict]) -> list[str]:
                 notes.append(f"⏱ {j['symbol']} {j['side']} time stop ({r:+.2f}R)")
                 changed = True
 
-    if changed:
+    if changed and persist:
         with journal_path().open("w") as f:
             for j in journal:
                 f.write(json.dumps(j, separators=(",", ":")) + "\n")
